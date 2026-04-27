@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data & generated output
+oct_cloud/
+oct.zip
+*.stl
+*.3mf
+*.npy
+
+# Screenshots & params
+*.png
+!README.md
+viewer_params_*.json
+*_meta.json
+
+# OS
+.DS_Store

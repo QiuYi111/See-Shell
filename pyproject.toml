@@ -1,0 +1,18 @@
+[project]
+name = "see-shell"
+version = "0.1.0"
+description = "OCT volumetric data visualization system"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyvista",
+    "pyvistaqt",
+    "pyqt6",
+    "vtk",
+    "scipy>=1.15.3",
+    "trimesh>=4.12.1",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
