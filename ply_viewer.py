@@ -8,8 +8,8 @@ import glob
 import numpy as np
 import pyvista as pv
 from pyvistaqt import QtInteractor
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QImage, QIcon, QPixmap, QColor, QFont
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
     QFileDialog, QGroupBox, QHBoxLayout,
@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
 BASE = os.path.dirname(os.path.abspath(__file__))
 OCT_DIR = os.path.join(BASE, "oct_cloud")
 FILTER_MODES = ["Intensity", "Hue (warm↔cool)", "Brightness", "Saturation"]
-THUMB_SIZE = 160
 
 
 def _rgb_to_hsv_vec(rgb):
@@ -50,81 +49,18 @@ def _rgb_to_metrics(rgb):
                 Brightness=brightness, Saturation=sat)
 
 
-def _mip_thumbnail(npy_path):
-    npy = np.load(npy_path)
-    img = np.zeros((512, 512), dtype=np.float32)
-    x = npy[:, 0].astype(int)
-    y = npy[:, 1].astype(int)
-    np.maximum.at(img, (x, y), npy[:, 3])
-    mx = img.max()
-    if mx > 0:
-        img = img / mx * 255
-    h, w = img.shape
-    return QImage(img.astype(np.uint8).tobytes(), w, h, w,
-                 QImage.Format.Format_Grayscale8).copy()
-
-
-def _npy_for_ply(ply_path):
-    return ply_path.replace(".ply", ".npy")
-
 
 def collect(directory: str | None = None):
-    """Scan *directory* (defaults to ``OCT_DIR``) for PLY scan files.
-
-    Returns a list of dicts with keys: group, suffix, path, npy.
-    """
     base = directory or OCT_DIR
     scans = []
     for f in sorted(glob.glob(os.path.join(base, "**", "*.ply"), recursive=True)):
         if os.path.getsize(f) == 0:
             continue
-        reldir = os.path.relpath(os.path.dirname(f), base)
-        dirname = os.path.basename(os.path.dirname(f))
-        if dirname.startswith("scan_array_"):
-            group = dirname.replace("scan_array_", "").split("_")
-            group = f"{group[0]} {group[1]}"
-        elif dirname.startswith("scan_session_"):
-            group = dirname.replace("scan_session_", "").split("_")
-            group = f"{group[0]} {group[1]}"
-        else:
-            group = reldir.replace(os.sep, "/")
-        basename = os.path.basename(f)
-        parts = basename.replace(".ply", "").split("_")
-        suffix = "_".join(parts[-2:]) if len(parts) >= 2 else basename
-        npy = _npy_for_ply(f)
-        has_npy = os.path.exists(npy) and os.path.getsize(npy) > 0
-        scans.append({"group": group, "suffix": suffix,
-                      "path": f, "npy": npy if has_npy else None})
+        scans.append({
+            "label": os.path.basename(f).replace(".ply", ""),
+            "path": f,
+        })
     return scans
-
-
-class ThumbnailLoader(QThread):
-    done = pyqtSignal(int, QPixmap)
-
-    def __init__(self, scans):
-        super().__init__()
-        self.scans = scans
-
-    def run(self):
-        for i, s in enumerate(self.scans):
-            try:
-                if s.get("remote_host") and not os.path.isfile(s["path"]):
-                    continue
-                if s["npy"]:
-                    qimg = _mip_thumbnail(s["npy"])
-                else:
-                    mesh = pv.read(s["path"])
-                    rgb = np.asarray(mesh["RGB"])
-                    gray = (rgb.astype(float) @ [0.299, 0.587, 0.114]).astype(np.uint8)
-                    qimg = QImage(gray.tobytes(), 1, len(gray), 1,
-                                  QImage.Format.Format_Grayscale8)
-                px = QPixmap.fromImage(qimg).scaled(
-                    THUMB_SIZE, THUMB_SIZE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
-                self.done.emit(i, px)
-            except Exception:
-                pass
 
 
 class ColumnWorker(QThread):
@@ -206,8 +142,7 @@ class Viewer(QMainWindow):
         self.btn_load_data = QPushButton("📂 Load Data…")
         left_layout.addWidget(self.btn_load_data)
         self.scan_list = QListWidget()
-        self.scan_list.setIconSize(QSize(THUMB_SIZE, THUMB_SIZE))
-        self.scan_list.setSpacing(4)
+        self.scan_list.setSpacing(2)
         self.scan_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.scan_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.scan_list.setMovement(QListWidget.Movement.Static)
@@ -353,21 +288,29 @@ class Viewer(QMainWindow):
         grp_layout.setSpacing(4)
 
         row_px = QHBoxLayout()
-        row_px.addWidget(QLabel("Pixel XY (mm):"))
-        self.spin_pixel_xy = QDoubleSpinBox()
-        self.spin_pixel_xy.setRange(0.0001, 1.0)
-        self.spin_pixel_xy.setDecimals(4)
-        self.spin_pixel_xy.setSingleStep(0.001)
-        self.spin_pixel_xy.setValue(0.0147)
-        self.spin_pixel_xy.setFixedWidth(90)
-        row_px.addWidget(self.spin_pixel_xy)
-        row_px.addWidget(QLabel("Pixel Z (mm):"))
+        row_px.addWidget(QLabel("Pixel X (mm):"))
+        self.spin_pixel_x = QDoubleSpinBox()
+        self.spin_pixel_x.setRange(0.0001, 1.0)
+        self.spin_pixel_x.setDecimals(4)
+        self.spin_pixel_x.setSingleStep(0.001)
+        self.spin_pixel_x.setValue(0.0143)
+        self.spin_pixel_x.setFixedWidth(80)
+        row_px.addWidget(self.spin_pixel_x)
+        row_px.addWidget(QLabel("Y:"))
+        self.spin_pixel_y = QDoubleSpinBox()
+        self.spin_pixel_y.setRange(0.0001, 1.0)
+        self.spin_pixel_y.setDecimals(4)
+        self.spin_pixel_y.setSingleStep(0.001)
+        self.spin_pixel_y.setValue(0.0169)
+        self.spin_pixel_y.setFixedWidth(80)
+        row_px.addWidget(self.spin_pixel_y)
+        row_px.addWidget(QLabel("Z:"))
         self.spin_pixel_z = QDoubleSpinBox()
         self.spin_pixel_z.setRange(0.0001, 1.0)
         self.spin_pixel_z.setDecimals(4)
         self.spin_pixel_z.setSingleStep(0.001)
-        self.spin_pixel_z.setValue(0.0147)
-        self.spin_pixel_z.setFixedWidth(90)
+        self.spin_pixel_z.setValue(0.00586)
+        self.spin_pixel_z.setFixedWidth(80)
         row_px.addWidget(self.spin_pixel_z)
         row_px.addStretch()
         grp_layout.addLayout(row_px)
@@ -381,6 +324,12 @@ class Viewer(QMainWindow):
         self.spin_smooth.setValue(6.0)
         self.spin_smooth.setFixedWidth(70)
         row_smooth.addWidget(self.spin_smooth)
+        row_smooth.addWidget(QLabel("Iterations:"))
+        self.spin_iterations = QSpinBox()
+        self.spin_iterations.setRange(0, 100)
+        self.spin_iterations.setValue(10)
+        self.spin_iterations.setFixedWidth(60)
+        row_smooth.addWidget(self.spin_iterations)
         row_smooth.addWidget(QLabel("Base H (mm):"))
         self.spin_base_h = QDoubleSpinBox()
         self.spin_base_h.setRange(0.5, 50.0)
@@ -443,15 +392,11 @@ class Viewer(QMainWindow):
         self.btn_save_stl.clicked.connect(self._on_save_stl)
 
         for s in self.scans:
-            item = QListWidgetItem(f"{s['group']}\n{s['suffix']}")
+            item = QListWidgetItem(s["label"])
             item.setData(Qt.ItemDataRole.UserRole, s)
             self.scan_list.addItem(item)
 
         self.plotter.set_background(self.bg_color)
-
-        self.thumb_loader = ThumbnailLoader(self.scans)
-        self.thumb_loader.done.connect(self._set_thumbnail)
-        self.thumb_loader.start()
 
         if self.scans:
             self.scan_list.setCurrentRow(0)
@@ -468,10 +413,6 @@ class Viewer(QMainWindow):
 
     # ── slots ──
 
-    def _set_thumbnail(self, idx, pixmap):
-        if 0 <= idx < self.scan_list.count():
-            self.scan_list.item(idx).setIcon(QIcon(pixmap))
-
     def _on_select(self, row):
         if row < 0 or row >= len(self.scans):
             return
@@ -479,7 +420,7 @@ class Viewer(QMainWindow):
         s = self.scans[row]
 
         if s.get("remote_host") and not os.path.isfile(s["path"]):
-            self.lbl_info.setText(f"Downloading {s['suffix']}…")
+            self.lbl_info.setText(f"Downloading {s['label']}…")
             self.scan_list.setEnabled(False)
             cache_dir = os.path.dirname(s["path"])
             self._jit_worker = JITDownloadWorker(
@@ -523,8 +464,8 @@ class Viewer(QMainWindow):
         self._rebuild_mesh()
 
         self.setWindowTitle(
-            f"PLY Viewer — {s['group']} {s['suffix']}  ({n:,} pts)  [{row+1}/{len(self.scans)}]")
-        self.lbl_info.setText(f"{s['group']} {s['suffix']} — {n:,} pts")
+            f"PLY Viewer — {s['label']}  ({n:,} pts)  [{row+1}/{len(self.scans)}]")
+        self.lbl_info.setText(f"{s['label']} — {n:,} pts")
 
     def _rebuild_mesh(self):
         if self.orig_pts is None:
@@ -635,8 +576,7 @@ class Viewer(QMainWindow):
             lo, hi = hi, lo
         params = {
             "scan_file": s["path"] if s else None,
-            "scan_group": s["group"] if s else None,
-            "scan_suffix": s["suffix"] if s else None,
+            "scan_label": s["label"] if s else None,
             "point_size": self.slider_size.value(),
             "background_color": self.bg_color,
             "filter_mode": self.filter_mode,
@@ -667,13 +607,15 @@ class Viewer(QMainWindow):
 
         from oct_to_column import ColumnConfig
         params = self._get_current_params()
-        suffix = params.get("scan_suffix", "output")
+        suffix = params.get("scan_label", "output")
         out_stl = os.path.join(BASE, f"column_{suffix}.stl")
 
         config = ColumnConfig(
-            pixel_size_mm=self.spin_pixel_xy.value(),
+            x_pixel_size_mm=self.spin_pixel_x.value(),
+            y_pixel_size_mm=self.spin_pixel_y.value(),
             z_pixel_size_mm=self.spin_pixel_z.value(),
             smoothing_sigma=self.spin_smooth.value(),
+            laplacian_iterations=self.spin_iterations.value(),
             base_height_mm=self.spin_base_h.value(),
             is_complement=False,
             output_stl=out_stl,
@@ -692,7 +634,7 @@ class Viewer(QMainWindow):
 
     def _on_export(self):
         params = self._get_current_params()
-        default_name = f"viewer_params_{params.get('scan_group','unknown').replace(' ','_')}_{params.get('scan_suffix','')}.json"
+        default_name = f"viewer_params_{params.get('scan_label','unknown')}.json"
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Visualization Parameters", default_name,
             "JSON Files (*.json);;All Files (*)")
@@ -727,21 +669,9 @@ class Viewer(QMainWindow):
                 return
             cache_root = os.path.join(tempfile.gettempdir(), "see-shell", host)
             for rp in remote_files:
-                reldir = os.path.relpath(os.path.dirname(rp), path)
-                dirname = os.path.basename(os.path.dirname(rp))
-                if dirname.startswith("scan_array_"):
-                    parts = dirname.replace("scan_array_", "").split("_")
-                    group = f"{parts[0]} {parts[1]}" if len(parts) >= 2 else dirname
-                elif dirname.startswith("scan_session_"):
-                    parts = dirname.replace("scan_session_", "").split("_")
-                    group = f"{parts[0]} {parts[1]}" if len(parts) >= 2 else dirname
-                else:
-                    group = reldir.replace(os.sep, "/")
                 basename = os.path.basename(rp)
-                suffix_parts = basename.replace(".ply", "").split("_")
-                suffix = "_".join(suffix_parts[-2:]) if len(suffix_parts) >= 2 else basename
                 new_scans.append({
-                    "group": group, "suffix": suffix,
+                    "label": basename.replace(".ply", ""),
                     "path": os.path.join(cache_root, os.path.relpath(rp, path)),
                     "npy": None,
                     "remote_host": host, "remote_path": rp,
@@ -754,16 +684,11 @@ class Viewer(QMainWindow):
         self.idx = -1
         self.scan_list.clear()
         for s in self.scans:
-            label = f"{s['group']}\n{s['suffix']}"
-            if s.get("remote_host"):
-                label = f"☁ {label}"
-            item = QListWidgetItem(label)
+            prefix = "☁ " if s.get("remote_host") else ""
+            item = QListWidgetItem(f"{prefix}{s['label']}")
             item.setData(Qt.ItemDataRole.UserRole, s)
             self.scan_list.addItem(item)
 
-        self.thumb_loader = ThumbnailLoader(self.scans)
-        self.thumb_loader.done.connect(self._set_thumbnail)
-        self.thumb_loader.start()
         if self.scans:
             self.scan_list.setCurrentRow(0)
 
@@ -771,7 +696,7 @@ class Viewer(QMainWindow):
         if self.idx < 0:
             return
         s = self.scans[self.idx]
-        default_name = f"column_{s['suffix']}.stl"
+        default_name = f"column_{s['label']}.stl"
         src = os.path.join(BASE, default_name)
         if not os.path.isfile(src):
             comp_src = src.replace(".stl", "_complement.stl")
@@ -791,9 +716,6 @@ class Viewer(QMainWindow):
             self.lbl_gen_status.setText(f"Saved → {os.path.basename(path)}")
 
     def closeEvent(self, e):
-        if self.thumb_loader.isRunning():
-            self.thumb_loader.quit()
-            self.thumb_loader.wait(2000)
         if hasattr(self, '_column_worker') and self._column_worker.isRunning():
             self._column_worker.quit()
             self._column_worker.wait(2000)

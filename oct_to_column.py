@@ -86,8 +86,10 @@ class ColumnConfig:
     median_filter_size: int = 5
 
     # Physical Calibration (Default to isotropic 14.7um unless specified)
-    pixel_size_mm: float = 0.0147        # 14.7 microns/pixel (X/Y)
-    z_pixel_size_mm: float = 0.0147      # 14.7 microns/pixel (Z) - isotropic default
+    x_pixel_size_mm: float = 0.0147       # 14.7 microns/pixel (X)
+    y_pixel_size_mm: float = 0.0147       # 14.7 microns/pixel (Y)
+    pixel_size_mm: float = 0.0147         # legacy alias for X/Y (used if x/y not set)
+    z_pixel_size_mm: float = 0.0147       # 14.7 microns/pixel (Z) - isotropic default
     auto_diameter: bool = True           # set diameter based on ROI
 
     # Column geometry (mm)
@@ -322,8 +324,8 @@ def build_column_mesh(GX: np.ndarray, GY: np.ndarray, GZ: np.ndarray, config: Co
     # ── Physical dimensions ──
     gx_min, gx_max = GX.min(), GX.max()
     gy_min, gy_max = GY.min(), GY.max()
-    dx_mm = (gx_max - gx_min) * config.pixel_size_mm
-    dy_mm = (gy_max - gy_min) * config.pixel_size_mm
+    dx_mm = (gx_max - gx_min) * config.x_pixel_size_mm
+    dy_mm = (gy_max - gy_min) * config.y_pixel_size_mm
     roi_diag = np.sqrt(dx_mm ** 2 + dy_mm ** 2)
 
     diameter = roi_diag * 1.1 if config.auto_diameter else config.diameter_mm
@@ -347,8 +349,8 @@ def build_column_mesh(GX: np.ndarray, GY: np.ndarray, GZ: np.ndarray, config: Co
 
     def get_z_at_mm(px: float, py: float) -> float:
         """Sample relief height from GZ heightfield at physical (mm) coords."""
-        gx = (px / config.pixel_size_mm) + (gx_min + gx_max) / 2.0
-        gy = (py / config.pixel_size_mm) + (gy_min + gy_max) / 2.0
+        gx = (px / config.x_pixel_size_mm) + (gx_min + gx_max) / 2.0
+        gy = (py / config.y_pixel_size_mm) + (gy_min + gy_max) / 2.0
 
         if not (gx_min <= gx <= gx_max and gy_min <= gy <= gy_max):
             return config.base_height_mm
