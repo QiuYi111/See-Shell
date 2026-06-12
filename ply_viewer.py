@@ -18,36 +18,10 @@ from PyQt6.QtWidgets import (
     QDialog,
 )
 
+from scan_filter import ScanFilter, FILTER_MODES
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 OCT_DIR = os.path.join(BASE, "oct_cloud")
-FILTER_MODES = ["Intensity", "Hue (warm↔cool)", "Brightness", "Saturation"]
-
-
-def _rgb_to_hsv_vec(rgb):
-    r, g, b = rgb[:, 0] / 255.0, rgb[:, 1] / 255.0, rgb[:, 2] / 255.0
-    cmax = np.maximum(np.maximum(r, g), b)
-    cmin = np.minimum(np.minimum(r, g), b)
-    delta = cmax - cmin
-    hue = np.zeros(len(rgb))
-    mask_d = delta > 0
-    mr = mask_d & (cmax == r)
-    mg = mask_d & (cmax == g) & ~mr
-    mb = mask_d & ~mr & ~mg
-    hue[mr] = 60.0 * (((g[mr] - b[mr]) / delta[mr]) % 6)
-    hue[mg] = 60.0 * (((b[mg] - r[mg]) / delta[mg]) + 2)
-    hue[mb] = 60.0 * (((r[mb] - g[mb]) / delta[mb]) + 4)
-    sat = np.where(cmax > 0, delta / cmax, 0.0)
-    return hue / 360.0 * 255.0, sat * 255.0
-
-
-def _rgb_to_metrics(rgb):
-    r, g, b = rgb[:, 0] / 255.0, rgb[:, 1] / 255.0, rgb[:, 2] / 255.0
-    intensity = (r * 0.299 + g * 0.587 + b * 0.114) * 255
-    brightness = np.maximum(np.maximum(r, g), b) * 255
-    hue, sat = _rgb_to_hsv_vec(rgb)
-    return dict(Intensity=intensity, **{"Hue (warm↔cool)": hue},
-                Brightness=brightness, Saturation=sat)
-
 
 
 def collect(directory: str | None = None):
@@ -76,8 +50,8 @@ class ColumnWorker(QThread):
 
     def run(self):
         try:
-            from oct_to_column import pipeline_from_params, ColumnConfig
-            mesh, report = pipeline_from_params(self.ply_path, self.params, self.config)
+            from oct_to_column import pipeline, ColumnConfig
+            mesh, report = pipeline(self.ply_path, self.params, self.config)
             msg = f"✅ {self.config.output_stl}"
             if not report["is_watertight"]:
                 msg += " (not watertight)"
@@ -87,7 +61,7 @@ class ColumnWorker(QThread):
                     "is_complement": True,
                     "output_stl": self.config.output_stl.replace(".stl", "_complement.stl"),
                 })
-                mesh2, report2 = pipeline_from_params(self.ply_path, self.params, comp_config)
+                mesh2, report2 = pipeline(self.ply_path, self.params, comp_config)
                 msg += f"\n✅ {comp_config.output_stl}"
 
             self.done.emit(True, msg)
@@ -128,9 +102,7 @@ class Viewer(QMainWindow):
         self.bg_color = "#0D0D14"
         self.orig_pts = None
         self.orig_rgb = None
-        self.metrics = {}
-        self.filter_mode = "Intensity"
-        self.axis_bounds = {}
+        self._filter = ScanFilter()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(splitter)
@@ -404,11 +376,11 @@ class Viewer(QMainWindow):
     # ── helpers ──
 
     def _slider_to_axis_val(self, axis, slider_val):
-        lo, hi = self.axis_bounds.get(axis, (0.0, 1.0))
+        lo, hi = self._filter.bounds.get(axis, (0.0, 1.0))
         return lo + (hi - lo) * slider_val / 1000.0
 
     def _axis_val_to_slider(self, axis, val):
-        lo, hi = self.axis_bounds.get(axis, (0.0, 1.0))
+        lo, hi = self._filter.bounds.get(axis, (0.0, 1.0))
         return int(1000.0 * (val - lo) / max(hi - lo, 1e-9))
 
     # ── slots ──
@@ -446,11 +418,9 @@ class Viewer(QMainWindow):
 
         self.orig_pts = np.asarray(mesh.points).copy()
         self.orig_rgb = np.asarray(mesh["RGB"]).copy()
-        self.metrics = _rgb_to_metrics(self.orig_rgb)
 
-        for i, ax in enumerate("xyz"):
-            col = self.orig_pts[:, i]
-            self.axis_bounds[ax] = (float(col.min()), float(col.max()))
+        self._filter = ScanFilter()
+        self._filter.set_bounds(self.orig_pts)
 
         for attr in ("slider_zmin", "slider_xmin", "slider_ymin"):
             getattr(self, attr).blockSignals(True)
@@ -471,30 +441,21 @@ class Viewer(QMainWindow):
         if self.orig_pts is None:
             return
 
-        metric = self.metrics.get(self.filter_mode)
-        lo = self.slider_min.value()
-        hi = self.slider_max.value()
-        if lo > hi:
-            lo, hi = hi, lo
-        mask = (metric >= lo) & (metric <= hi) if metric is not None else np.ones(len(self.orig_pts), dtype=bool)
+        # Sync slider state into the filter
+        self._filter.update(
+            mode=self._filter.mode,
+            filter_min=self.slider_min.value(),
+            filter_max=self.slider_max.value(),
+            z_min=self._slider_to_axis_val("z", self.slider_zmin.value()),
+            z_max=self._slider_to_axis_val("z", self.slider_zmax.value()),
+            x_min=self._slider_to_axis_val("x", self.slider_xmin.value()),
+            x_max=self._slider_to_axis_val("x", self.slider_xmax.value()),
+            y_min=self._slider_to_axis_val("y", self.slider_ymin.value()),
+            y_max=self._slider_to_axis_val("y", self.slider_ymax.value()),
+        )
 
-        for ax, smin_attr, smax_attr in [
-            ("z", "slider_zmin", "slider_zmax"),
-            ("x", "slider_xmin", "slider_xmax"),
-            ("y", "slider_ymin", "slider_ymax"),
-        ]:
-            blo, bhi = self.axis_bounds.get(ax, (0, 1))
-            ax_idx = "xyz".index(ax)
-            vmin = self._slider_to_axis_val(ax, getattr(self, smin_attr).value())
-            vmax = self._slider_to_axis_val(ax, getattr(self, smax_attr).value())
-            if vmin > vmax:
-                vmin, vmax = vmax, vmin
-            col = self.orig_pts[:, ax_idx]
-            mask &= (col >= vmin) & (col <= vmax)
-
-        pts = self.orig_pts[mask]
-        rgb = self.orig_rgb[mask]
-        vis = int(mask.sum())
+        pts, rgb = self._filter.apply(self.orig_pts, self.orig_rgb)
+        vis = len(pts)
         total = len(self.orig_pts)
 
         self.plotter.clear()
@@ -510,6 +471,9 @@ class Viewer(QMainWindow):
         self.plotter.render()
 
         self.lbl_filtered.setText(f"{vis:,}/{total:,} ({100*vis/max(1,total):.0f}%)")
+        lo, hi = self._filter.filter_min, self._filter.filter_max
+        if lo > hi:
+            lo, hi = hi, lo
         self.lbl_min.setText(str(lo))
         self.lbl_max.setText(str(hi))
         self._update_axis_labels()
@@ -539,7 +503,7 @@ class Viewer(QMainWindow):
             self.plotter.render()
 
     def _on_filter_mode(self, mode):
-        self.filter_mode = mode
+        self._filter.update(mode=mode)
         self._rebuild_mesh()
 
     def _on_filter(self):
@@ -570,27 +534,12 @@ class Viewer(QMainWindow):
 
     def _get_current_params(self):
         s = self.scans[self.idx] if self.idx >= 0 else None
-        lo = self.slider_min.value()
-        hi = self.slider_max.value()
-        if lo > hi:
-            lo, hi = hi, lo
-        params = {
-            "scan_file": s["path"] if s else None,
-            "scan_label": s["label"] if s else None,
-            "point_size": self.slider_size.value(),
-            "background_color": self.bg_color,
-            "filter_mode": self.filter_mode,
-            "filter_min": lo,
-            "filter_max": hi,
-        }
-        for ax in "xyz":
-            vmin = self._slider_to_axis_val(ax, getattr(self, f"slider_{ax}min").value())
-            vmax = self._slider_to_axis_val(ax, getattr(self, f"slider_{ax}max").value())
-            if vmin > vmax:
-                vmin, vmax = vmax, vmin
-            params[f"{ax}_min"] = round(vmin, 4)
-            params[f"{ax}_max"] = round(vmax, 4)
-        return params
+        return self._filter.to_params(
+            scan_file=s["path"] if s else None,
+            scan_label=s["label"] if s else None,
+            point_size=self.slider_size.value(),
+            background_color=self.bg_color,
+        )
 
     def _on_generate(self):
         if self.idx < 0:

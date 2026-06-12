@@ -29,44 +29,7 @@ from scipy.ndimage import gaussian_filter, median_filter
 import trimesh
 import pyvista as pv
 
-# ---------------------------------------------------------------------------
-# 1. RGB → scalar metrics (exact copy from ply_viewer.py)
-# ---------------------------------------------------------------------------
-
-FILTER_MODES = ["Intensity", "Hue (warm↔cool)", "Brightness", "Saturation"]
-
-
-def _rgb_to_hsv_vec(rgb: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Vectorised RGB → HSV. Returns (hue_0_255, saturation_0_255)."""
-    r, g, b = rgb[:, 0] / 255.0, rgb[:, 1] / 255.0, rgb[:, 2] / 255.0
-    cmax = np.maximum(np.maximum(r, g), b)
-    cmin = np.minimum(np.minimum(r, g), b)
-    delta = cmax - cmin
-    hue = np.zeros(len(rgb))
-    mask_d = delta > 0
-    mr = mask_d & (cmax == r)
-    mg = mask_d & (cmax == g) & ~mr
-    mb = mask_d & ~mr & ~mg
-    hue[mr] = 60.0 * (((g[mr] - b[mr]) / delta[mr]) % 6)
-    hue[mg] = 60.0 * (((b[mg] - r[mg]) / delta[mg]) + 2)
-    hue[mb] = 60.0 * (((r[mb] - g[mb]) / delta[mb]) + 4)
-    sat = np.where(cmax > 0, delta / cmax, 0.0)
-    return hue / 360.0 * 255.0, sat * 255.0
-
-
-def _rgb_to_metrics(rgb: np.ndarray) -> dict:
-    """Compute all four filter metrics from RGB, identical to ply_viewer.py."""
-    r, g, b = rgb[:, 0] / 255.0, rgb[:, 1] / 255.0, rgb[:, 2] / 255.0
-    intensity = (r * 0.299 + g * 0.587 + b * 0.114) * 255
-    brightness = np.maximum(np.maximum(r, g), b) * 255
-    hue, sat = _rgb_to_hsv_vec(rgb)
-    return {
-        "Intensity": intensity,
-        "Hue (warm↔cool)": hue,
-        "Brightness": brightness,
-        "Saturation": sat,
-    }
-
+from scan_filter import ScanFilter, FILTER_MODES, rgb_to_metrics
 
 # ---------------------------------------------------------------------------
 # 2. Configuration
@@ -139,43 +102,9 @@ def apply_viewer_filter(
     rgb: np.ndarray,
     params: dict,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply the exact same spatial + colour filter as the viewer.
-
-    This reproduces the mask logic from ply_viewer.py _rebuild_mesh():
-      1. Compute the metric selected by params["filter_mode"]
-      2. Apply filter_min / filter_max (0-255 range)
-      3. AND with spatial x/y/z clipping
-    """
-    # --- Colour / intensity filter (exact viewer logic) ---
-    metrics = _rgb_to_metrics(rgb)
-    filter_mode = params.get("filter_mode", "Intensity")
-    lo = params.get("filter_min", 0)
-    hi = params.get("filter_max", 255)
-    if lo > hi:
-        lo, hi = hi, lo
-
-    metric = metrics.get(filter_mode)
-    if metric is not None:
-        mask = (metric >= lo) & (metric <= hi)
-    else:
-        mask = np.ones(len(points), dtype=bool)
-
-    # --- Spatial clipping (exact viewer logic) ---
-    for ax, ax_min_key, ax_max_key in [
-        ("x", "x_min", "x_max"),
-        ("y", "y_min", "y_max"),
-        ("z", "z_min", "z_max"),
-    ]:
-        vmin = params.get(ax_min_key)
-        vmax = params.get(ax_max_key)
-        if vmin is not None and vmax is not None:
-            if vmin > vmax:
-                vmin, vmax = vmax, vmin
-            ax_idx = "xyz".index(ax)
-            col = points[:, ax_idx]
-            mask &= (col >= vmin) & (col <= vmax)
-
-    return points[mask], rgb[mask]
+    """Apply the exact same spatial + colour filter as the viewer."""
+    f = ScanFilter.from_params(params)
+    return f.apply(points, rgb)
 
 
 # ---------------------------------------------------------------------------
@@ -588,96 +517,6 @@ def save_metadata(
 
 def pipeline(
     ply_path: str,
-    params_path: str,
-    config: ColumnConfig,
-) -> Tuple[trimesh.Trimesh, dict]:
-    t0 = time.time()
-
-    # [1/7] Loading data
-    print("[1/7] Loading data...")
-    print(f"  PLY:    {ply_path}")
-    print(f"  Params: {params_path}")
-    points, rgb = load_ply_points(ply_path)
-    params = load_viewer_params(params_path)
-    print(f"  Points: {points.shape[0]:,}")
-
-    # [2/7] Apply viewer filter (spatial + colour, matches ply_viewer.py)
-    filter_mode = params.get("filter_mode", "Intensity")
-    filter_lo = params.get("filter_min", 0)
-    filter_hi = params.get("filter_max", 255)
-    print(f"[2/7] Applying viewer filter...")
-    print(f"  Filter: {filter_mode} [{filter_lo}, {filter_hi}]")
-    print(f"  ROI  x=[{params['x_min']:.1f}, {params['x_max']:.1f}]  "
-          f"y=[{params['y_min']:.1f}, {params['y_max']:.1f}]  "
-          f"z=[{params['z_min']:.1f}, {params['z_max']:.1f}]")
-    points, rgb = apply_viewer_filter(points, rgb, params)
-    print(f"  After filter: {points.shape[0]:,} points")
-    if points.shape[0] < 100:
-        raise ValueError(
-            f"Only {points.shape[0]} points remain after filtering. "
-            "Need at least 100 to build a surface."
-        )
-
-    # [3/7] Extracting top surface
-    print("[3/7] Extracting top surface...")
-
-    def _progress(done, total):
-        if done == 0:
-            print(f"  Processing ~{total:,} populated cells...")
-
-    GX, GY, GZ, density = extract_top_heightfield(
-        points, rgb, config, progress_callback=_progress,
-    )
-    n_valid = int(np.sum(~np.isnan(GZ)))
-    print(f"  Valid cells: {n_valid:,} / {config.grid_size**2:,}  "
-          f"({100 * n_valid / config.grid_size**2:.1f} %)")
-    if n_valid < 4:
-        raise ValueError(
-            f"Only {n_valid} valid heightfield cells — cannot proceed."
-        )
-
-    # [4/7] Smoothing
-    print("[4/7] Smoothing...")
-    GZ_smooth = fill_holes_and_smooth(GZ, config)
-    print(f"  Z range after smoothing: [{np.nanmin(GZ_smooth):.2f}, {np.nanmax(GZ_smooth):.2f}]")
-
-    # [5/7] Building column mesh
-    print("[5/7] Building column mesh...")
-    mesh = build_column_mesh(GX, GY, GZ_smooth, config)
-    print(f"  Vertices: {mesh.vertices.shape[0]:,}  |  Faces: {mesh.faces.shape[0]:,}")
-
-    # [6/7] Validating mesh
-    print("[6/7] Validating mesh...")
-    report = validate_mesh(mesh)
-    if not report["is_watertight"]:
-        print("  ⚠  Mesh not watertight — attempting repair...")
-        mesh = repair_mesh(mesh)
-        report = validate_mesh(mesh)
-    print(f"  Watertight: {report['is_watertight']}  |  "
-          f"Printable: {report['is_printable']}  |  "
-          f"Euler: {report['euler_number']}")
-    if report["issues"]:
-        for issue in report["issues"]:
-            print(f"  ⚠  {issue}")
-
-    # [7/7] Exporting
-    print("[7/7] Exporting...")
-    mesh.export(config.output_stl)
-    print(f"  STL → {config.output_stl}")
-
-    if config.output_preview:
-        generate_preview(mesh, config.output_preview)
-
-    duration = time.time() - t0
-    if config.output_metadata:
-        save_metadata(config, params, report, config.output_metadata, duration)
-
-    print(f"\nDone in {duration:.1f}s")
-    return mesh, report
-
-
-def pipeline_from_params(
-    ply_path: str,
     params: dict,
     config: ColumnConfig,
 ) -> Tuple[trimesh.Trimesh, dict]:
@@ -686,10 +525,11 @@ def pipeline_from_params(
     # [1/7] Loading data
     print("[1/7] Loading data...")
     print(f"  PLY:    {ply_path}")
+    print(f"  Params: {params.get('scan_file', '<dict>')}")
     points, rgb = load_ply_points(ply_path)
     print(f"  Points: {points.shape[0]:,}")
 
-    # [2/7] Apply viewer filter
+    # [2/7] Apply viewer filter (spatial + colour, matches ply_viewer.py)
     filter_mode = params.get("filter_mode", "Intensity")
     filter_lo = params.get("filter_min", 0)
     filter_hi = params.get("filter_max", 255)
@@ -774,6 +614,40 @@ def pipeline_from_params(
 # 14. CLI entry point
 # ---------------------------------------------------------------------------
 
+
+def _build_config(args, params: dict) -> ColumnConfig:
+    """Build ColumnConfig from CLI args."""
+    config = ColumnConfig(
+        grid_size=args.grid_size,
+        top_percentile=args.top_percentile,
+        top_window=args.top_window,
+        min_points=args.min_points,
+        smoothing_sigma=args.smooth_sigma,
+        median_filter_size=args.median_size,
+        laplacian_iterations=args.laplacian,
+        pixel_size_mm=args.pixel_size_mm,
+        z_pixel_size_mm=args.z_pixel_size_mm,
+        auto_diameter=args.auto_diameter,
+        diameter_mm=args.diameter_mm,
+        base_height_mm=args.base_height_mm,
+        relief_height_mm=args.relief_height_mm,
+        use_physical_z=args.physical_z,
+        ring_segments=args.ring_segments,
+        n_radial=args.n_radial,
+        is_complement=args.complement,
+        output_stl=args.out,
+        output_preview=args.out.replace(".stl", ".png") if args.preview else None,
+        output_metadata=args.out.replace(".stl", "_meta.json"),
+    )
+
+    # Auto-suffix for complement
+    if args.complement and "_complement" not in config.output_stl:
+        config.output_stl = config.output_stl.replace(".stl", "_complement.stl")
+        if config.output_preview:
+            config.output_preview = config.output_preview.replace(".png", "_complement.png")
+
+    return config
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="OCT point cloud → printable column STL pipeline",
@@ -827,36 +701,8 @@ def main() -> None:
         print(f"Error: PLY not found: {ply_path}", file=sys.stderr)
         sys.exit(1)
 
-    config = ColumnConfig(
-        grid_size=args.grid_size,
-        top_percentile=args.top_percentile,
-        top_window=args.top_window,
-        min_points=args.min_points,
-        smoothing_sigma=args.smooth_sigma,
-        median_filter_size=args.median_size,
-        laplacian_iterations=args.laplacian,
-        pixel_size_mm=args.pixel_size_mm,
-        z_pixel_size_mm=args.z_pixel_size_mm,
-        auto_diameter=args.auto_diameter,
-        diameter_mm=args.diameter_mm,
-        base_height_mm=args.base_height_mm,
-        relief_height_mm=args.relief_height_mm,
-        use_physical_z=args.physical_z,
-        ring_segments=args.ring_segments,
-        n_radial=args.n_radial,
-        is_complement=args.complement,
-        output_stl=args.out,
-        output_preview=args.out.replace(".stl", ".png") if args.preview else None,
-        output_metadata=args.out.replace(".stl", "_meta.json"),
-    )
-    
-    # Auto-suffix for complement
-    if args.complement and "_complement" not in config.output_stl:
-        config.output_stl = config.output_stl.replace(".stl", "_complement.stl")
-        if config.output_preview:
-            config.output_preview = config.output_preview.replace(".png", "_complement.png")
-
-    pipeline(ply_path, args.params, config)
+    config = _build_config(args, params)
+    pipeline(ply_path, params, config)
 
 
 if __name__ == "__main__":
